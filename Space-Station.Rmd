@@ -1,0 +1,212 @@
+---
+title: "Visualizing International Space Station Information via API"
+author: "Henry Siegler"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+```
+
+### Note
+
+Last ran on:
+```{r, echo = FALSE}
+Sys.time()
+```
+```{r}
+library(httr)
+library(jsonlite)
+library(tidyverse)
+library(leaflet)
+library(htmltools)
+library(DT)
+```
+
+### Motivation
+
+The international space station (ISS) is an orbital outpost that circles high above us. It sometimes is right above us. Of course, this depends on your location.
+
+One of the Open-Notify APIs provides predictions of pass times of the International Space Station for a given location.
+
+The goal of this project is to request data from this API to get the soonest predicted ISS pass times for all of the US state capitals, and to display that information in an interactive map.
+
+### Locations of U.S. State Capitals
+
+```{r}
+#read in txt file with latitudes and longitudes for all US state capitals
+
+data <- read.table("https://people.sc.fsu.edu/~jburkardt/datasets/states/state_capitals_ll.txt", col.names = c("state", "lat", "long"))
+
+#read in txt file with the state capital city names
+
+cities_data <- read.table("https://people.sc.fsu.edu/~jburkardt/datasets/states/state_capitals_name.txt", col.names = c("state","Capital"))
+
+data <- data %>% 
+  left_join(cities_data, by = "state") %>% 
+  filter(state != "US") %>% 
+  select(state, Capital, lat, long)
+```
+
+### The Data
+
+```{r}
+head(data, 5) %>% 
+  datatable()
+```
+
+### Single API Request
+
+First, lets look at the data when we request information from the _Open Notify API_ for a single state capital. The latitude and longitude of Sacramento, CA is displayed below.
+
+```{r}
+data %>% 
+  filter(Capital == "Sacramento")
+
+sacramento_lat <- data %>% 
+  filter(Capital == "Sacramento") %>% 
+  pull(lat)
+
+sacramento_long <- data %>% 
+  filter(Capital == "Sacramento") %>% 
+  pull(long)
+```
+
+To request the data from the _Open Notify API_, we pass in a latitude and longitude into the URL and convert the results in a dataframe.
+
+```{r}
+sacramento_url <- str_c("http://api.open-notify.org/iss/v1/?lat=",
+                        sacramento_lat,
+                        "&lon=", sacramento_long)
+
+result <- GET(sacramento_url)
+
+result <- result$content %>% 
+    rawToChar() %>% 
+    fromJSON()
+
+result$response
+```
+For a given location, the API returns a list of upcoming predicted International Space Station pass times. The time is provided in Unix Time, which we convert below.
+
+```{r}
+result$response %>% 
+  mutate(risetime = anytime::anytime(risetime))
+```
+
+
+### Request Passover Times for all State Capitals
+
+```{r}
+#pass all the latitudes and longitudes into the url to the API
+
+urls <- str_c("http://api.open-notify.org/iss/v1/?lat=", 
+              data$lat, 
+              "&lon=", data$long)
+```
+
+```{r}
+#convert the information into a dataframe that contains all of the capitals
+
+api_data <- data.frame()
+
+for (i in 1:length(urls)) {
+  
+  res <- GET(urls[i])
+  
+  res <- res$content %>% 
+    rawToChar() %>% 
+    fromJSON()
+  
+  res <- res$response
+  
+  df <- res %>% 
+    mutate(soonest_pass = 1:n(),
+           state = data[i, 1],
+           Capital = data[i, 2],
+           lat = data[i, 3],
+           long = data[i, 4]) %>% 
+    filter(soonest_pass %in% 1:3)
+  
+  api_data <- api_data %>% 
+    rbind(df)
+}
+```
+
+We now have next 3 International Space Station predicted passes for every state capital. 
+
+```{r}
+head(api_data, 9) %>% 
+  datatable()
+```
+
+### Preparing the Data for Mapping
+
+```{r}
+#pivot the data wider, and clean it up for the leaflet graph
+api_data <- api_data %>% 
+  select(Capital, state, lat, long, soonest_pass, risetime) %>% 
+  pivot_wider(names_from = soonest_pass,
+              values_from = risetime) %>% 
+  rename(first = `1`,
+         second = `2`,
+         third = `3`) %>% 
+  mutate(across(.cols = c('first', 'second', 'third'),
+                .fns = anytime::anytime)) %>% 
+  arrange(first)
+```
+
+```{r}
+head(api_data, 5) %>% 
+  datatable()
+```
+
+### Mapping the Data
+
+The interactive map displays all of the US state capitals. Hovering over a capital shows that capital's next predicted ISS pass time. Clicking on a capital shows that capital's next 3 predicted ISS pass times.
+
+```{r}
+#make an space station icon
+capital_icon <- makeIcon(iconUrl = "http://www.clker.com/cliparts/f/b/3/3/11949837751080925187us_capitol_building_cli_01.svg.hi.png",
+    iconWidth = 25, iconHeight = 25)
+
+#make the label for the first pass time
+labels <- paste(api_data$Capital, ", ", api_data$state, ":",
+                "<br>", "Next Pass Time: ", api_data$first, "<br>", 
+                sep = "")
+
+#make the popup for the next three pass times on click
+popups <- paste(api_data$Capital, ", ", api_data$state, ":",
+                "<br>", "Pass Time #1: ", api_data$first,
+                "<br>", "Pass Time #2: ", api_data$second,
+                "<br>", "Pass Time #3: ", api_data$third,
+                sep = "")
+
+#make leaflet map with interactive icons
+leaflet(data = api_data) %>% 
+  addTiles() %>% 
+  addMarkers(~long, ~lat,
+             icon = capital_icon,
+             label = lapply(labels, HTML),
+             popup = lapply(popups, HTML)
+             )
+```
+
+We can also add lines that connect the US state capitals in order of predicted pass times.
+
+```{r}
+leaflet(data = api_data) %>% 
+  addTiles() %>% 
+  addMarkers(~long, ~lat,
+             icon = capital_icon,
+             label = lapply(labels, HTML),
+             popup = lapply(popups, HTML)
+             ) %>% 
+  addPolylines(~long, ~lat, color = "red", weight = 2)
+```
+
+
+
+
